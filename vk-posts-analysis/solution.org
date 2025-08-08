@@ -1,0 +1,132 @@
+#+title: Выполнение тестового задания на позицию аналитика в X от Y
+#+date: [2025-08-07]
+#+OPTIONS: author:nil
+#+OPTIONS: ^:nil
+#+LATEX_HEADER: \usepackage{fontspec}
+#+LATEX_HEADER: \setmainfont{DejaVu Sans}
+#+LATEX_HEADER: \setmonofont{Ubuntu Mono}
+#+LATEX_HEADER: \usepackage[top=1in, bottom=1in, left=0.4in, right=0.4in]{geometry}
+#+LATEX_HEADER: \usepackage{hyperref}
+#+LATEX_HEADER: \usepackage{xcolor}
+#+LATEX_HEADER: \definecolor{linkcolor}{RGB}{95,158,160}
+#+LATEX_HEADER: \definecolor{urlcolor}{RGB}{0,71,171}
+#+LATEX_HEADER: \hypersetup{colorlinks=true, linkcolor=linkcolor, urlcolor=urlcolor}
+#+LATEX_HEADER: \urlstyle{same}
+#+LATEX_HEADER: \usepackage{parskip}
+#+LATEX_HEADER: \setlength{\parskip}{1em}
+#+LATEX_HEADER: \usepackage[outputdir=.]{minted}
+#+LATEX_HEADER: \usemintedstyle{default}
+
+* Задание
+
+- Собрать данные о постах с личной страницы во ВКонтакте, они должны включать дату публикации и количество лайков.
+- Ответить на вопрос: что больше всего влияет на количество лайков: время суток публикации, день недели или промежуток между постами.
+
+* Исходные данные
+
+Я решил взять все посты [[https://vk.com/durov][Павла Дурова]], собрал их с помощью [[https://targethunter.ru/][TargetHunter]]. Выгрузка оттуда содержит 1020 постов с различной дополнительной информацией не касающейся задания.
+
+Для её обработки я использовал [[https://colab.research.google.com/drive/1eVMmXMt1LfQ80CvhxQMv4-d7GGv1YS4T?usp=sharing][ноутбук в Google Colab]]. Там же провёл дополнительную аналитику.
+
+Преобразованные данные прилагаю с этим отчётом в файле [[file:data/durov-posts-cleaned.csv][durov-posts-cleaned.csv]]. Он содержит:
+
+- =date= - дата публикации
+- =likes= - количество лайков
+- =hour= - время суток (0-23)
+- =day_of_week= - день недели (0-6, 0 - понедельник)
+- =hours_since_last_post= - количество часов прошедших с публикации предыдущего поста
+- =day_category= - категория времени суток (0: утро, 1: день, 2: вечер, 3: ночь)
+
+Данные были загружены в Supabase (PostgreSQL) для анализа, проверки и демонстрации работы SQL-запроса.
+
+* SQL-запрос
+
+В запросе все факторы приводятся к категориальному типу, для каждого бина считается стандартное отклонение, затем стандартное отклонение считается для каждого фактора в целом.
+
+#+begin_src sql
+WITH factor_analysis AS (
+  -- Анализ по часам суток
+  SELECT 
+    'hour' AS factor_type,
+    CAST(hour AS TEXT) AS factor_value,
+    COUNT(*) AS posts_count,
+    ROUND(AVG(likes), 2) AS avg_likes,
+    ROUND(STDDEV(likes), 2) AS std_likes,
+    MIN(likes) AS min_likes,
+    MAX(likes) AS max_likes
+  FROM posts
+  GROUP BY hour
+  
+  UNION ALL
+  
+  -- Анализ по дням недели
+  SELECT 
+    'day_of_week' AS factor_type,
+    CAST(day_of_week AS TEXT) AS factor_value,
+    COUNT(*) AS posts_count,
+    ROUND(AVG(likes), 2) AS avg_likes,
+    ROUND(STDDEV(likes), 2) AS std_likes,
+    MIN(likes) AS min_likes,
+    MAX(likes) AS max_likes
+  FROM posts
+  GROUP BY day_of_week
+  
+  UNION ALL
+  
+  -- Анализ по интервалам между постами
+  SELECT 
+    'hours_since_last_post' AS factor_type,
+    CASE 
+      WHEN hours_since_last_post IS NULL THEN 'first_post'
+      WHEN hours_since_last_post < 1 THEN '<1h'
+      WHEN hours_since_last_post < 6 THEN '1-6h'
+      WHEN hours_since_last_post < 24 THEN '6-24h'
+      WHEN hours_since_last_post < 72 THEN '1-3d'
+      ELSE '>3d'
+    END AS factor_value,
+    COUNT(*) AS posts_count,
+    ROUND(AVG(likes), 2) AS avg_likes,
+    ROUND(STDDEV(likes), 2) AS std_likes,
+    MIN(likes) AS min_likes,
+    MAX(likes) AS max_likes
+  FROM posts
+  GROUP BY 2
+),
+
+-- Статистика разброса для каждого фактора
+factor_variance AS (
+  SELECT 
+    factor_type,
+    MAX(avg_likes) - MIN(avg_likes) AS range_avg_likes,
+    ROUND(STDDEV(avg_likes), 2) AS variance_between_groups
+  FROM factor_analysis
+  GROUP BY factor_type
+)
+
+-- Результат
+SELECT 
+  factor_type,
+  range_avg_likes,
+  variance_between_groups,
+  CASE 
+    WHEN variance_between_groups = MAX(variance_between_groups) OVER() 
+    THEN 'Наиболее сильное влияние'
+    ELSE ''
+  END AS influence_rating
+FROM factor_variance
+ORDER BY variance_between_groups DESC;
+#+end_src
+
+* Результат запроса и выводы
+
+| factor_type           | range_avg_likes | variance_between_groups |
+|-----------------------+-----------------+-------------------------|
+| hours_since_last_post |           52036 |                   23729 |
+| hour                  |           45834 |                   11300 |
+| day_of_week           |           16677 |                    6818 |
+
+Видно что стандартное отклонение для фактора частоты постов самое значимое, а значит частота постов больше всего влияет на количество лайков.
+
+Для строгой проверки в ноутбуке я также сделал ANCOVA анализ, по нему частота постов - единственно статистически значимый фактор, который влияет на количество лайков (p = 0.000014). При этом предсказательная сила (R-квадрат) = 4,9%.
+
+Мне стало интересно, и я там же посчитал некоторые статистики по частоте постов Павла. Для наглядности построил heatmap, по которому видно, что он начинает писать посты поздно вечером или ночью, а с 4 до 13 спит :).

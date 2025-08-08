@@ -1,0 +1,9 @@
+*.pdf
+*.tex
+*.docx
+
+_minted
+
+# Это выгрузка постов Дурова из TargetHunter, убрал потому что там
+# содержатся тексты постов.
+vk-posts-analysis/data/targethunter-durov-posts.csv
